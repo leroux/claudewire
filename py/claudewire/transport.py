@@ -230,6 +230,13 @@ class BridgeTransport:
         if asyncio.iscoroutine(result):
             result = await result
 
+        # CLI requires updatedInput on Allow responses (Zod validation).
+        # Match SDK Query behavior: fall back to original tool_input.
+        from claudewire.permissions import Allow
+
+        if isinstance(result, Allow) and result.updated_input is None:
+            result = Allow(updated_input=tool_input)
+
         response = to_control_response(request_id, result)
         if self._stdio_logger:
             self._stdio_logger.debug(">>> STDIN  %s (auto)", json.dumps(response))
