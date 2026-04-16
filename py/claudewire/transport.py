@@ -230,39 +230,40 @@ class BridgeTransport:
         if asyncio.iscoroutine(result):
             result = await result
 
+        # CLI requires updatedInput on Allow responses (Zod validation).
+        # Match SDK Query behavior: fall back to original tool_input.
+        from claudewire.permissions import Allow
+
+        if isinstance(result, Allow) and result.updated_input is None:
+            result = Allow(updated_input=tool_input)
+
         response = to_control_response(request_id, result)
         if self._stdio_logger:
             self._stdio_logger.debug(">>> STDIN  %s (auto)", json.dumps(response))
         await self._conn.send_stdin(self._name, response)
 
     async def stop(self) -> None:
-        """Immediately terminate the read stream and kill the CLI process.
+        """Terminate the read stream and kill the CLI process.
 
-        Unlike close(), which blocks until the process dies, stop() returns
-        instantly.  It injects an ExitEvent into the local queue so that
-        read_messages() terminates on the next iteration (discarding any
-        buffered messages).  The actual process kill runs in the background.
-
-        Safe to call from any coroutine — including one that is concurrently
-        iterating read_messages().
+        Injects an ExitEvent into the local queue so that read_messages()
+        terminates on the next iteration (discarding any buffered messages),
+        then kills the process synchronously to avoid a race where a
+        fire-and-forget kill task outlives this transport and kills a
+        newly-spawned process registered under the same name.
         """
         if self._cli_exited:
             return
         self._cli_exited = True
-        log.debug("[stop][%s] injecting ExitEvent and scheduling background kill", self._name)
+        log.debug("[stop][%s] injecting ExitEvent and killing process", self._name)
         _tracer.start_span("claudewire.stop", attributes={"agent.name": self._name}).end()
         # Inject ExitEvent to unblock read_messages() immediately
         if self._queue:
             await self._queue.put(ExitEvent(name=self._name, code=None))
-        # Kill the process in the background (don't wait)
-        asyncio.create_task(self._background_kill())
-
-    async def _background_kill(self) -> None:
-        """Kill the process via the connection. Runs as a fire-and-forget task."""
+        # Kill synchronously — avoids race with subsequent spawn under same name
         try:
             await self._conn.kill(self._name)
         except Exception:
-            log.debug("[stop][%s] background kill failed (process may already be dead)", self._name)
+            log.debug("[stop][%s] kill failed (process may already be dead)", self._name)
 
     async def close(self) -> None:
         """Kill the CLI process and unregister."""
